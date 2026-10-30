@@ -49,35 +49,12 @@ def a_sensor(q, v_tierra):
     return n.rotar_a_tierra(q_conj(q), v_tierra)
 
 
-def find_attitude_original(dqw, dqx, dqy, dqz):
-    """Copia literal de la función de plugin.py antes de la rama vanguardia (referencia
-    de compatibilidad: navigation.attitude no debe cambiar)."""
-    from math import atan2, asin, pi, sqrt
-    norm = sqrt(dqw * dqw + dqx * dqx + dqy * dqy + dqz * dqz)
-    dqw = dqw / norm
-    dqx = dqx / norm
-    dqy = dqy / norm
-    dqz = dqz / norm
-    ysqr = dqy * dqy
-    xsqr = dqx * dqx
-    zsqr = dqz * dqz
-    t0 = +2.0 * (dqw * dqx + dqy * dqz)
-    t1 = +1.0 - 2.0 * (xsqr + ysqr)
-    roll_raw = atan2(t0, t1)
-    roll = -roll_raw
-    t2 = +2.0 * (dqw * dqy - dqz * dqx)
-    t2 = +1.0 if t2 > +1.0 else t2
-    t2 = -1.0 if t2 < -1.0 else t2
-    pitch_raw = asin(t2)
-    pitch = -pitch_raw
-    t3 = +2.0 * (dqw * dqz + dqx * dqy)
-    t4 = +1.0 - 2.0 * (ysqr + zsqr)
-    yaw_raw = atan2(t3, t4)
-    if yaw_raw > 0:
-        yaw = 2 * pi - yaw_raw
-    else:
-        yaw = abs(yaw_raw)
-    return roll, pitch, yaw
+def q_barco(roll, pitch, yaw, proa=(0, 1, 0), estribor=(1, 0, 0)):
+    """El cuaternión de un barco con esa actitud física (rad; roll + estribor abajo, pitch +
+    proa arriba, yaw + a estribor), para un chip montado con esos ejes a proa y a estribor y
+    la cara arriba: rumbo alrededor de la vertical y, sobre los ejes del propio chip, cabeceo
+    alrededor de estribor y balance alrededor de proa (Z-Y-X)."""
+    return q_mult(q_eje((0, 0, 1), -yaw), q_mult(q_eje(estribor, pitch), q_eje(proa, roll)))
 
 
 class Reloj:
@@ -148,31 +125,66 @@ def valores(delta):
 # ---------------------------------------------------------------------------
 
 class TestActitud(unittest.TestCase):
+    """H7 (auditoría Codex, 30-oct): la actitud con el montaje explícito, probada con
+    movimientos físicos conocidos (antes se comparaba con la fórmula vieja, que con el +Y a
+    proa cambiaba balance y cabeceo)."""
 
     def test_identidad(self):
-        self.assertEqual(n.find_attitude(1, 0, 0, 0), (-0.0, -0.0, 0))
+        for a in n.actitud_barco((0.0, 0.0, 0.0, 1.0)):
+            self.assertAlmostEqual(a, 0.0)
 
-    def test_ejes_conocidos(self):
-        # find_attitude recibe (real, i, j, k)
-        i, j, k, r = q_eje((0, 0, 1), 30 * GR)  # giro antihorario de 30° sobre Z (arriba)
-        roll, pitch, yaw = n.find_attitude(r, i, j, k)
-        self.assertAlmostEqual(yaw, 330 * GR)  # rumbo en sentido horario: 360 - 30
-        i, j, k, r = q_eje((1, 0, 0), 20 * GR)
-        self.assertAlmostEqual(n.find_attitude(r, i, j, k)[0], -20 * GR)
-        i, j, k, r = q_eje((0, 1, 0), 10 * GR)
-        self.assertAlmostEqual(n.find_attitude(r, i, j, k)[1], -10 * GR)
+    def test_el_caso_de_la_auditoria(self):
+        # 20° alrededor de +Y (la proa): la proa sigue al Norte y estribor baja = balance a estribor
+        roll, pitch, yaw = n.actitud_barco(q_eje((0, 1, 0), 20 * GR))
+        self.assertAlmostEqual(roll, 20 * GR)
+        self.assertAlmostEqual(pitch, 0.0)
+        self.assertAlmostEqual(yaw, 0.0)
 
-    def test_igual_que_la_version_anterior(self):
+    def test_movimientos_fisicos_conocidos(self):
+        casos = [((20, 0, 0), "escora 20° a estribor"), ((-15, 0, 0), "escora 15° a babor"),
+                 ((0, 10, 0), "proa arriba 10°"), ((0, -8, 0), "proa abajo 8°"),
+                 ((0, 0, 30), "cae 30° a estribor"), ((0, 0, 270), "rumbo al Oeste"),
+                 ((25, -5, 123), "ciñendo escorado, con la ola, rumbo 123°")]
+        for (r, p, y), nombre in casos:
+            a = n.actitud_barco(q_barco(r * GR, p * GR, y * GR))
+            for x, esperado in zip(a, (r * GR, p * GR, n.envolver(y * GR))):
+                self.assertAlmostEqual(x, esperado, msg=nombre)
+
+    def test_cualquier_actitud_vuelve(self):
         rnd = random.Random(7)
         for _ in range(2000):
-            q = [rnd.uniform(-1, 1) for _ in range(4)]
-            self.assertEqual(n.find_attitude(*q), find_attitude_original(*q))
+            r, p, y = rnd.uniform(-60, 60) * GR, rnd.uniform(-60, 60) * GR, rnd.uniform(0, 359.9) * GR
+            for x, esperado in zip(n.actitud_barco(q_barco(r, p, y)), (r, p, y)):
+                self.assertAlmostEqual(x, esperado, places=9)
+
+    def test_otro_montaje(self):
+        # el chip con +X a proa: estribor es -Y (con la cara arriba). Sin ningún offset, lo mismo
+        m = n.ejes_montaje("+x", "-y")
+        roll, pitch, yaw = n.actitud_barco(q_barco(20 * GR, 5 * GR, 40 * GR, proa=(1, 0, 0), estribor=(0, -1, 0)), m)
+        self.assertAlmostEqual(roll, 20 * GR)
+        self.assertAlmostEqual(pitch, 5 * GR)
+        # el rumbo cuenta desde la proa del barco: con el cuaternión identidad el +X del chip mira al Este
+        self.assertAlmostEqual(n.actitud_barco((0.0, 0.0, 0.0, 1.0), m)[2], 90 * GR)
+
+    def test_montaje_imposible(self):
+        with self.assertRaises(ValueError):
+            n.ejes_montaje("+y", "-y")
+        with self.assertRaises(ValueError):
+            n.ejes_montaje("+w", "+x")
+        with self.assertRaises(ValueError):
+            n.Config({"devEjeProa": "+y", "devEjeEstribor": "+y"})
+
+    def test_coherente_con_el_marco_del_barco(self):
+        # la actitud y tierra_a_barco son la MISMA convención: el estribor del chip, girado a Tierra y
+        # pasado al barco con la actitud, es (0, 1, 0)
+        q = q_barco(18 * GR, -7 * GR, 211 * GR)
+        roll, pitch, yaw = n.actitud_barco(q)
+        for a, b in zip(n.tierra_a_barco(n.rotar_a_tierra(q, (1, 0, 0)), roll, pitch, yaw), (0.0, 1.0, 0.0)):
+            self.assertAlmostEqual(a, b)
 
     def test_cuaternion_sin_normalizar(self):
-        i, j, k, r = q_eje((0, 0, 1), 30 * GR)
-        a = n.find_attitude(r, i, j, k)
-        b = n.find_attitude(3 * r, 3 * i, 3 * j, 3 * k)
-        for x, y in zip(a, b):
+        q = q_barco(10 * GR, 4 * GR, 30 * GR)
+        for x, y in zip(n.actitud_barco(q), n.actitud_barco(tuple(3 * c for c in q))):
             self.assertAlmostEqual(x, y)
 
     def test_envolver(self):
@@ -242,8 +254,8 @@ class TestRateOfTurn(unittest.TestCase):
         self.assertAlmostEqual(n.tasa_de_giro(q0, gyro), 0.2)
         dt = 1e-4
         q1 = q_mult(q_eje((0, 0, 1), -0.2 * dt), q0)
-        y0 = n.find_attitude(q0[3], q0[0], q0[1], q0[2])[2]
-        y1 = n.find_attitude(q1[3], q1[0], q1[1], q1[2])[2]
+        y0 = n.actitud_barco(q0)[2]
+        y1 = n.actitud_barco(q1)[2]
         self.assertAlmostEqual((y1 - y0) / dt, 0.2, places=4)
 
 
@@ -345,7 +357,7 @@ class TestDelta(unittest.TestCase):
         d = emitidos[0]
         v = valores(d)
         att = v["navigation.attitude"]
-        r, p, y = n.find_attitude(Q_ESCORADO[3], *Q_ESCORADO[:3])
+        r, p, y = n.actitud_barco(Q_ESCORADO)
         self.assertEqual(att, {"pitch": p, "roll": r, "yaw": y})
         self.assertAlmostEqual(v["navigation.headingCompass"], y)
         self.assertAlmostEqual(v["navigation.headingMagnetic"], n.envolver(y + 1 * GR))

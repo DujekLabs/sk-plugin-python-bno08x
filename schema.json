@@ -52,6 +52,20 @@
             "description": "Initial estimate in decimal degrees (used if any  other source -NooA, Signalk itself- is unavailable",
             "default": 3
           },
+          "devEjeProa": {
+            "type": "string",
+            "title": "Eje del chip hacia proa",
+            "description": "qué eje del BNO08x apunta a proa (por defecto +y, el montaje del README); la actitud se calcula con él",
+            "enum": ["+y", "-y", "+x", "-x", "+z", "-z"],
+            "default": "+y"
+          },
+          "devEjeEstribor": {
+            "type": "string",
+            "title": "Eje del chip hacia estribor",
+            "description": "qué eje del BNO08x apunta a estribor (por defecto +x); perpendicular al de proa o el plugin no arranca",
+            "enum": ["+x", "-x", "+y", "-y", "+z", "-z"],
+            "default": "+x"
+          },
           "devHdgOffset": {
             "type": "number",
             "title": "Heading Offset",

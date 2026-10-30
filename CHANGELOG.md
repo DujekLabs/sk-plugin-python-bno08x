@@ -1,3 +1,8 @@
+## 1.1.0-majareta.2
+- **Actitud con el montaje explícito (sensor → barco)**: nuevas opciones `devEjeProa` y `devEjeEstribor` (por defecto `+y` y `+x`, el montaje del README). La actitud sale de girar esos dos ejes al marco Tierra (Z-Y-X: roll + estribor abajo, pitch + proa arriba, yaw = rumbo de la proa). La fórmula del plugin original tomaba el rumbo del +Y del chip pero el balance alrededor del +X: con el +Y a proa, **balance y cabeceo salían cambiados** (escorar 20° a estribor publicaba pitch −20°). Auditoría del 30-oct, H7.
+- **Cambia `navigation.attitude`** respecto a 1.1.0-majareta.1 con el montaje por defecto: roll y pitch ahora son los físicos. Hay que comprobarlo a bordo (escorar a estribor → roll +; proa arriba → pitch +).
+- Pruebas de movimientos físicos conocidos (escora, cabeceo, rumbo, combinaciones y 2.000 actitudes al azar que vuelven), otro montaje sin offsets, montajes imposibles y la coherencia con el marco del barco. Se retira `find_attitude` y la prueba que la comparaba con la fórmula vieja.
+
 ## 1.1.0-majareta.1
 - **Nuevo `navigation.rateOfTurn`** (rad/s, + a estribor) desde el giróscopo calibrado, como componente vertical (marco Tierra) de la velocidad angular: no depende del montaje ni de la escora.
 - **Nueva aceleración lineal sin gravedad**: `sensors.imu.acceleration` {x proa, y estribor, z abajo} en m/s² y `sensors.imu.verticalAcceleration` (marco Tierra, + arriba) para medir las olas. Van bajo prefijo propio porque Signal K 1.8.x no tiene rutas estándar para esto (no existen `navigation.acceleration` ni `environment.*.waves`).

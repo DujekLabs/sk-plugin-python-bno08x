@@ -66,11 +66,11 @@ class FalsoBNO08X_I2C:
             struct.unpack_from("<h", report_bytes, 4 + 2 * i)[0] * escala for i in range(cuenta))
 
     def _process_available_packets(self, max_packets=None):
-        # barco escorado 20° a estribor... en el marco del sensor: giro de -20° sobre X
-        s, c = math.sin(-10 * GR), math.cos(-10 * GR)
+        # barco escorado 20° a estribor con el montaje del README (+Y del chip a proa): giro de +20° sobre +Y (H7)
+        s, c = math.sin(10 * GR), math.cos(10 * GR)
         rv = bytearray(14)
         rv[0], rv[2] = 0x05, 3
-        struct.pack_into("<hhhhh", rv, 4, _q14(s), 0, 0, _q14(c), int(0.02 * 4096))
+        struct.pack_into("<hhhhh", rv, 4, 0, _q14(s), 0, _q14(c), int(0.02 * 4096))
         gyro = bytearray(10)
         gyro[0], gyro[2] = 0x02, 3
         struct.pack_into("<hhh", gyro, 4, 0, _q9(0.0), _q9(0.05))
@@ -171,7 +171,8 @@ class TestPluginEntero(unittest.TestCase):
                     self.assertEqual(u["source"]["src"], "I2C_at[0x4b]")
         self.assertAlmostEqual(rutas["sensors.imu.verticalAcceleration"], 0.5 * math.cos(20 * GR), places=2)
         self.assertAlmostEqual(rutas["navigation.rateOfTurn"], -0.05 * math.cos(20 * GR), places=2)
-        self.assertAlmostEqual(abs(rutas["navigation.attitude"]["roll"]), 20 * GR, places=3)
+        self.assertAlmostEqual(rutas["navigation.attitude"]["roll"], 20 * GR, places=3)  # + = a estribor
+        self.assertAlmostEqual(rutas["navigation.attitude"]["pitch"], 0.0, places=3)
         self.assertAlmostEqual(rutas["sensors.imu.headingAccuracy"], 0.02, places=3)
         self.assertEqual(rutas["sensors.imu.calibration.linearAcceleration"], 2)
         self.assertEqual(rutas["sensors.imu.state"], "ok")

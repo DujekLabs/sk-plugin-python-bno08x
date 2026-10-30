@@ -137,13 +137,22 @@ El estado del plugin en la interfaz de administración de Signal K muestra si el
 - **rateOfTurn** = −(componente vertical Tierra de la velocidad angular del giróscopo).
   El giróscopo da + para giros antihorarios; con z arriba eso es caer a babor, de ahí el
   signo: + = a estribor, como pide Signal K.
+- **Montaje (sensor → barco), explícito**: `devEjeProa` y `devEjeEstribor` dicen qué eje del
+  chip apunta a proa y cuál a estribor (por defecto **+Y a proa y +X a estribor**, con la cara
+  del chip arriba). La actitud se calcula girando esos dos ejes al marco Tierra:
+  rumbo = hacia dónde mira la proa, pitch = cuánto sube la proa, roll = cuánto baja estribor
+  (Z-Y-X, la convención de Signal K: roll + estribor abajo, pitch + proa arriba).
+  Antes se usaba la fórmula del plugin original, que toma el rumbo del +Y del chip pero el
+  balance alrededor del +X: con el +Y a proa, **balance y cabeceo salían cambiados**
+  (auditoría del 30-oct, H7). Con otro montaje ya no hace falta compensar el rumbo con
+  `devHdgOffset`: basta con decir los ejes. Los offsets quedan para el ajuste fino.
 - **Marco del barco** (`sensors.imu.acceleration`): el de Signal K / aeronáutico, x proa,
   y estribor, z abajo, construido con la **actitud que publica el plugin** (roll, pitch y
-  yaw con sus offsets). Es correcto en la medida en que `navigation.attitude` lo sea.
-- **Rumbo con `rotationVector`**: la fórmula de actitud (sin cambios desde el plugin
-  original) da como rumbo la dirección del eje **+Y del chip**. Si el +Y del sensor no
-  apunta a proa, compénsalo con `devHdgOffset` (p. ej. con +X a proa suele hacer falta
-  +90°). Con `gameRotationVector` el origen del rumbo es arbitrario.
+  yaw con sus offsets), la misma convención.
+- **Pendiente de comprobar a bordo**: con el sensor puesto, escorar el barco a estribor tiene
+  que dar roll +, y levantar la proa, pitch +. Si sale al revés, el montaje real no es el
+  declarado: se corrige con `devEjeProa` y `devEjeEstribor`, no con offsets.
+- Con `gameRotationVector` el origen del rumbo es arbitrario.
 
 ### Fuente de rumbo (`devHeadingSource`)
 

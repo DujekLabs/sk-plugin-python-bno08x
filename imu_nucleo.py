@@ -2,7 +2,7 @@
 Núcleo sin hardware del plugin sk-py-bno08x (rama majareta del fork DujekLabs).
 
 Todo lo que no toca el bus I2C vive aquí para poder probarlo sin el sensor:
-matemáticas (cuaternión -> actitud, rotación al marco Tierra, rateOfTurn),
+matemáticas (cuaternión -> actitud del barco con el montaje, rotación al marco Tierra, rateOfTurn),
 lectura de la configuración, construcción del delta de Signal K y el bucle con
 vigilancia y reconexión. plugin.py solo conecta esto con la librería de Adafruit,
 la red (declinación NOAA) y la salida estándar.
@@ -11,8 +11,9 @@ Marcos de referencia (ver README, apartado "Convención de ejes"):
 - Sensor: marco Android del BNO08x (X, Y, Z del chip, Z sale de la cara del chip).
 - Tierra: el del cuaternión del BNO08x, ENU (X Este, Y Norte magnético, Z arriba).
   Con el game rotation vector el "Norte" es arbitrario, pero Z sigue siendo la vertical.
-- Barco: el de Signal K / aeronáutico, x proa, y estribor, z abajo, definido por la
-  actitud que publica el propio plugin (roll + estribor abajo, pitch + proa arriba,
+- Barco: el de Signal K / aeronáutico, x proa, y estribor, z abajo. El paso sensor -> barco
+  es EXPLÍCITO: qué eje del chip va a proa y cuál a estribor (devEjeProa, devEjeEstribor;
+  por defecto +Y y +X), y de ahí la actitud (roll + estribor abajo, pitch + proa arriba,
   yaw + a estribor).
 
 MIT License, Copyright (c) 2026 dpazz (código original) y DujekLabs (cambios majareta).
@@ -123,39 +124,42 @@ def crear_clase_bno(base, reloj=time.monotonic, max_paquetes=40):
 # Matemáticas
 # ---------------------------------------------------------------------------
 
-def find_attitude(dqw, dqx, dqy, dqz):
-    """Cuaternión -> (roll, pitch, yaw) en rad. Es la fórmula original del plugin, sin
-    cambios, para que navigation.attitude y los rumbos salgan igual que antes."""
-    norm = math.sqrt(dqw * dqw + dqx * dqx + dqy * dqy + dqz * dqz)
-    dqw = dqw / norm
-    dqx = dqx / norm
-    dqy = dqy / norm
-    dqz = dqz / norm
+# EL MONTAJE (auditoría Codex 30-oct, H7): qué eje del chip va a proa y cuál a estribor. Antes la actitud salía de la
+# fórmula original, que toma el rumbo del +Y del chip pero el balance alrededor del +X: con el +Y a proa (el montaje del
+# README), balance y cabeceo salían cambiados (escorar 20° a estribor daba pitch -20°). Ahora la transformación es explícita.
+EJES_SENSOR = {"+x": (1.0, 0.0, 0.0), "-x": (-1.0, 0.0, 0.0), "+y": (0.0, 1.0, 0.0),
+               "-y": (0.0, -1.0, 0.0), "+z": (0.0, 0.0, 1.0), "-z": (0.0, 0.0, -1.0)}
+MONTAJE_POR_DEFECTO = ("+y", "+x")  # el del README: +Y del chip a proa, +X a estribor, la cara (+Z) arriba
 
-    ysqr = dqy * dqy
-    xsqr = dqx * dqx
-    zsqr = dqz * dqz
 
-    t0 = +2.0 * (dqw * dqx + dqy * dqz)
-    t1 = +1.0 - 2.0 * (xsqr + ysqr)
-    roll_raw = math.atan2(t0, t1)
-    roll = -roll_raw  # report clockwise in radians from 0 to + or - pi
+def _cruz(a, b):
+    return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
 
-    t2 = +2.0 * (dqw * dqy - dqz * dqx)
-    t2 = +1.0 if t2 > +1.0 else t2
-    t2 = -1.0 if t2 < -1.0 else t2
-    pitch_raw = math.asin(t2)
-    pitch = -pitch_raw  # report clockwise in radians from 0 to + or - pi
 
-    t3 = +2.0 * (dqw * dqz + dqx * dqy)
-    t4 = +1.0 - 2.0 * (ysqr + zsqr)
-    yaw_raw = math.atan2(t3, t4)
-    if yaw_raw > 0:
-        yaw = 2 * math.pi - yaw_raw
-    else:
-        yaw = abs(yaw_raw)
-    # heading in radians clockwise from 0 to 2*pi
+def ejes_montaje(proa, estribor):
+    """('+y', '+x') -> los dos vectores del marco del sensor. ValueError si un eje no
+    existe o si proa y estribor no son perpendiculares (un montaje imposible)."""
+    p, e = EJES_SENSOR.get(str(proa).lower()), EJES_SENSOR.get(str(estribor).lower())
+    if p is None or e is None:
+        raise ValueError("eje del sensor desconocido: %s / %s (vale +x, -x, +y, -y, +z, -z)" % (proa, estribor))
+    if abs(sum(a * b for a, b in zip(p, e))) > 1e-9:
+        raise ValueError("proa (%s) y estribor (%s) tienen que ser perpendiculares" % (proa, estribor))
+    return p, e
 
+
+def actitud_barco(q_ijkr, montaje=None):
+    """Cuaternión (i, j, k, real) de la librería -> (roll, pitch, yaw) del BARCO en rad,
+    convención de Signal K (Z-Y-X, la misma que tierra_a_barco): roll + estribor abajo,
+    pitch + proa arriba, yaw = rumbo de la proa en sentido horario desde el Norte del
+    cuaternión. Se giran al marco Tierra (ENU) los ejes del chip que van a proa y a
+    estribor: yaw = atan2(proa.E, proa.N), pitch = asin(proa.arriba), roll =
+    atan2(-estribor.arriba, cubierta.arriba), con cubierta = estribor x proa."""
+    p, e = montaje if montaje is not None else ejes_montaje(*MONTAJE_POR_DEFECTO)
+    f, s = rotar_a_tierra(q_ijkr, p), rotar_a_tierra(q_ijkr, e)
+    arriba = _cruz(s, f)
+    pitch = math.asin(max(-1.0, min(1.0, f[2])))
+    roll = math.atan2(-s[2], arriba[2])
+    yaw = envolver(math.atan2(f[0], f[1]))
     return roll, pitch, yaw
 
 
@@ -249,6 +253,8 @@ class Config:
         self.hdgDeviation = _num(o, "devHdgDeviation", 0)
         self.rollOffset = _num(o, "devRollOffset", 0)
         self.pitchOffset = _num(o, "devPitchOffset", 0)
+        # el montaje: qué eje del chip va a proa y cuál a estribor (H7); uno imposible no arranca
+        self.montaje = ejes_montaje(o.get("devEjeProa", MONTAJE_POR_DEFECTO[0]), o.get("devEjeEstribor", MONTAJE_POR_DEFECTO[1]))
         # --- nuevas (rama majareta) ---
         fuente = o.get("devHeadingSource", FUENTE_ROTACION)
         self.fuente_rumbo = fuente if fuente in (FUENTE_ROTACION, FUENTE_JUEGO) else FUENTE_ROTACION
@@ -471,8 +477,7 @@ class BucleImu:
                     and ahora - q_ultima.t <= cfg.edad_maxima(qi))
         actitud = None
         if q_valida:
-            i, j, k, r = q_ultima.valores
-            roll, pitch, yaw = find_attitude(r, i, j, k)
+            roll, pitch, yaw = actitud_barco(q_ultima.valores, cfg.montaje)
             roll += cfg.rollOffset * math.pi / 180
             pitch += cfg.pitchOffset * math.pi / 180
             yaw = envolver(yaw + cfg.hdgOffset * math.pi / 180)
