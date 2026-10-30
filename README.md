@@ -19,7 +19,8 @@ The project uses the I2C protocol alternative (but also serial or SPI are availa
         Depending on the wiring of the breakout board, the default I2C address may be 0x4A [74] or 0x4B [75].
         The plugin scans I2C bus to find the actual address (if any) and compares it with the one defined
         in parameters 'schema' logging a warning if the address found is different from the one defined.
-        Absence of either adresses in the bus forces the plugin to stop.
+        If no BNO08X is on the bus the plugin does not stop: it shows the state and retries
+        (waiting 1, 2, 4... up to 30 s) until the sensor answers.
 
 The parameter schema can enable the calculation of Magnetic Variation (declination) using programmatically the NOAA calculator (see [here](https://www.ngdc.noaa.gov/geomag/calculators/magcalc.shtml)) and lat/lon position data given by Signalk server itself (if this option is enabled, the connection to internet must be available or the estimated value defined in schema is used). The query to NoAA calculator is repeated at the configured time interval in plugin schema (default: 5 Hours).
 ##### [Note]
@@ -87,34 +88,117 @@ the following steps are required only for the first installation of the plugin.
 
 >   sed -i s/raise\ error/#raise\ error/ .env/lib/python3.11/site-packages/adafruit_bno08x/__init__.py
 
-## Supported SignalK data path
+## Rutas de Signal K que publica (rama `majareta`, 1.1.0)
 
-- ### Defined in standard Signalk Data Model
+Todas salen en **un único delta por ciclo**; dentro de él, cada `update` lleva el
+`timestamp` real de la muestra del sensor que lo origina (no el de envío). Una muestra
+que ya se publicó o que es más vieja que su caducidad no se vuelve a publicar.
 
-- self.navigation.attitude {pitch, roll, yaw} (reported as 'object' as defined in signalk specs.)
+### Del modelo estándar de Signal K (especificación 1.8.x)
 
-- self.navigation.headingCompass
-- self.navigation.headingMagnetic -> (headingCompass + magneticDeviation)
+| Ruta | Unidad | Frecuencia por defecto | Notas |
+|---|---|---|---|
+| `navigation.attitude` `{roll, pitch, yaw}` | rad | 10 Hz (`devAttitudeRate`) | misma fórmula que antes; `yaw` ahora envuelto a [0, 2π) |
+| `navigation.rateOfTurn` | rad/s | 10 Hz (`devAttitudeRate`) | **nuevo**; + = cae a estribor |
+| `navigation.headingCompass` | rad | 10 Hz (`devHeadingRate`) | |
+| `navigation.headingMagnetic` | rad | 10 Hz | headingCompass + desvío (`devHdgDeviation`) |
+| `navigation.headingTrue` | rad | 10 Hz | solo con `devDeclRequired`: headingMagnetic + declinación |
+| `navigation.magneticVariation` | rad | al arrancar y cada `devDeclInterval` h | solo con `devDeclRequired` |
 
-if query to NOAA declination calculator is enabled two more deltas are sent:
+### Propias del plugin, bajo `sensors.imu.` (no existen en la especificación)
 
-- self.navigation.headingTrue -> (headingMagnetic + magneticDeclination)
-- self.navigation.magneticVariation
+Signal K no tiene ruta estándar para la aceleración lineal ni para la aceleración
+vertical de las olas (en la 1.8.x no hay `navigation.acceleration` ni
+`environment.*.waves`; lo más cercano es `environment.heave`, en metros, que este
+plugin no calcula). Por eso van bajo un prefijo propio, con su `meta` (unidades y
+descripción) enviado al conectar:
 
-- ### Custom data path
-    emitted only if calibration enabled in schema
-    (at startup plus every 100 standard delta sent)
+| Ruta | Unidad | Frecuencia | Qué es |
+|---|---|---|---|
+| `sensors.imu.acceleration` `{x, y, z}` | m/s² | 10 Hz (`devAccelRate`) | aceleración lineal **sin gravedad** en el marco del barco: x proa, y estribor, z abajo |
+| `sensors.imu.verticalAcceleration` | m/s² | 10 Hz (`devAccelRate`) | aceleración vertical sin gravedad en el marco **Tierra**, + arriba (la útil para la altura de ola) |
+| `sensors.imu.headingAccuracy` | rad | 1 Hz (`devStatusRate`) | precisión estimada del rumbo (solo con `rotationVector`) |
+| `sensors.imu.calibration.<informe>` | 0-3 | 1 Hz | estado de cada informe: `rotationVector`/`gameRotationVector`, `magnetometer`, `gyroscope`, `linearAcceleration` (0 no fiable, 1 baja, 2 media, 3 alta) |
+| `sensors.imu.calibration.lastSaved` | fecha ISO | al guardar | última vez que se guardó la calibración (`devAutoSaveCalibration`) |
+| `sensors.imu.state` | texto | al cambiar | `ok` / `reconectando` |
 
-- self.sensors.magnetometer.calibration_status (number) the value of 2 means ok for navigation (less than 2° error) 
-- self.sensors.magnetometer.calibration_accuracy (string)
+Siguen saliendo, igual que antes, si `devCalibRequired` está activo (cada 100 deltas de actitud):
+`sensors.magnetometer.calibration_status` (0-3) y `sensors.magnetometer.calibration_quality` (texto).
+
+El estado del plugin en la interfaz de administración de Signal K muestra si el IMU está
+`ok`, perdido o reconectando.
+
+### Convención de ejes
+
+- **Marco Tierra**: el del cuaternión del BNO08x, ENU (x Este, y Norte magnético, z arriba).
+  `verticalAcceleration` y `rateOfTurn` se calculan girando la medida del sensor con el
+  cuaternión, así que **no dependen de cómo esté montado el sensor** ni de la escora:
+  con el barco escorado 20°, una aceleración vertical pura sale entera en `verticalAcceleration`.
+- **rateOfTurn** = −(componente vertical Tierra de la velocidad angular del giróscopo).
+  El giróscopo da + para giros antihorarios; con z arriba eso es caer a babor, de ahí el
+  signo: + = a estribor, como pide Signal K.
+- **Montaje (sensor → barco), explícito**: `devEjeProa` y `devEjeEstribor` dicen qué eje del
+  chip apunta a proa y cuál a estribor (por defecto **+Y a proa y +X a estribor**, con la cara
+  del chip arriba). La actitud se calcula girando esos dos ejes al marco Tierra:
+  rumbo = hacia dónde mira la proa, pitch = cuánto sube la proa, roll = cuánto baja estribor
+  (Z-Y-X, la convención de Signal K: roll + estribor abajo, pitch + proa arriba).
+  Antes se usaba la fórmula del plugin original, que toma el rumbo del +Y del chip pero el
+  balance alrededor del +X: con el +Y a proa, **balance y cabeceo salían cambiados**
+  (auditoría del 30-oct, H7). Con otro montaje ya no hace falta compensar el rumbo con
+  `devHdgOffset`: basta con decir los ejes. Los offsets quedan para el ajuste fino.
+- **Marco del barco** (`sensors.imu.acceleration`): el de Signal K / aeronáutico, x proa,
+  y estribor, z abajo, construido con la **actitud que publica el plugin** (roll, pitch y
+  yaw con sus offsets), la misma convención.
+- **Pendiente de comprobar a bordo**: con el sensor puesto, escorar el barco a estribor tiene
+  que dar roll +, y levantar la proa, pitch +. Si sale al revés, el montaje real no es el
+  declarado: se corrige con `devEjeProa` y `devEjeEstribor`, no con offsets.
+- Con `gameRotationVector` el origen del rumbo es arbitrario.
+
+### Fuente de rumbo (`devHeadingSource`)
+
+- `rotationVector` (**por defecto**): fusión de acelerómetro, giróscopo y magnetómetro
+  hecha en el propio BNO08x, referida al Norte magnético, con corrección de la deriva y
+  estimación de la precisión del rumbo. Según el datasheet de CEVA es "la estimación de
+  orientación más precisa disponible".
+- `gameRotationVector` (comportamiento anterior): solo acelerómetro y giróscopo. El
+  rumbo no tiene referencia al Norte y deriva con el tiempo, así que `headingCompass`,
+  `headingMagnetic` y `headingTrue` no eran rumbos de verdad. Sirve si hay muchas
+  perturbaciones magnéticas a bordo y basta un rumbo relativo.
+
+### Calibración
+
+- `devDynamicCalibration` (sí por defecto): activa la calibración dinámica del BNO08x en
+  cada arranque y reconexión (no persiste tras un reset del chip).
+- `devAutoSaveCalibration` (no por defecto): guarda la calibración en el chip cuando el
+  magnetómetro y la fuente de orientación llevan `devAutoSaveSeconds` (30 s) con estado
+  ≥ `devAutoSaveMinStatus` (3), como mucho una vez cada `devAutoSaveIntervalMin` (60 min).
+- `devCalibRequired` (opción antigua): calibración bloqueante al arrancar (hasta 50 s);
+  ahora solo guarda si se consigue estado ≥ 2.
+
+### Robustez
+
+- Si el bus I2C falla 3 lecturas seguidas, o no llega ninguna muestra nueva en
+  `devWatchdogSeconds` (3 s), el sensor se da por perdido: se deja de publicar, se
+  muestra el estado y se reconecta con espera creciente (1, 2, 4… hasta 30 s). El plugin
+  no se cae. Si no hay sensor en el bus al arrancar, se reintenta igual.
+- La consulta de declinación (NOAA / Signal K) va en un hilo aparte y ya no detiene la
+  publicación de la actitud.
+- Lo que la librería de Adafruit imprime por consola va a `debug.log` (máx. 1 MB), nunca
+  a la salida que lee Signal K.
+
+### Pruebas
+
+    python3 -m unittest discover -s test -v      # o: npm test
+
+No hace falta el sensor ni la librería de Adafruit: `test/test_imu.py` prueba el núcleo
+(`imu_nucleo.py`) con un BNO08x de mentira y `test/test_plugin.py` arranca `plugin.py`
+entero con los módulos de hardware simulados.
 
 ## Files generated in plugin directory
 
->The files 'calibration.log' and 'debug.log' collect the DEBUG messages for some protocol situation not managed
->by the Adafruit BNO08x library (it happens during calibration) and normally sent to stdout, during calibration
->at startup and during periodic calibration, respectively. This plugin redirects this tipe of output to files
->in order to filter to stdout only messages that can be interpreted as signalk deltas by the server.
->The 'debug.log' file is **limited to 1 Mbyte length** and then *owerwritten*.
+>The file 'debug.log' collects the DEBUG messages printed by the Adafruit BNO08x library
+>(normally sent to stdout) so that only Signal K deltas reach the server.
+>The 'debug.log' file is **limited to 1 Mbyte length** and then *overwritten*.
 
 ## Acnowledgments
 

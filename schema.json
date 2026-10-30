@@ -7,8 +7,7 @@
       "items": {
         "type": "object",
         "required": [
-          "devName",
-          "devRefresh"
+          "devName"
         ],
         "properties": {
           "devName": {
@@ -19,8 +18,8 @@
           },
           "devRefresh": {
             "type": "number",
-            "title": "Refresh rate",
-            "description": "deltas sending rate per second",
+            "title": "Refresh rate (obsoleto, ya no se usa)",
+            "description": "Antes: deltas por segundo. Desde 1.1.0 lo sustituyen devAttitudeRate, devHeadingRate y devAccelRate.",
             "default": 3
           },
           "devDelayReports": {
@@ -32,7 +31,7 @@
           "devCalibRequired": {
             "type": "boolean",
             "title": "Device Calibration required and saved",
-            "description": "",
+            "description": "Al arrancar espera hasta 50 s a que el estado de calibración sea >= 2 estable 5 s y entonces la guarda (si se agota el tiempo ya NO la guarda). Publica además sensors.magnetometer.calibration_status/_quality cada 100 deltas de actitud.",
             "default": false
           },
           "devDeclRequired": {
@@ -52,6 +51,20 @@
             "title": "Magnetic Variation (Declination) estimate",
             "description": "Initial estimate in decimal degrees (used if any  other source -NooA, Signalk itself- is unavailable",
             "default": 3
+          },
+          "devEjeProa": {
+            "type": "string",
+            "title": "Eje del chip hacia proa",
+            "description": "qué eje del BNO08x apunta a proa (por defecto +y, el montaje del README); la actitud se calcula con él",
+            "enum": ["+y", "-y", "+x", "-x", "+z", "-z"],
+            "default": "+y"
+          },
+          "devEjeEstribor": {
+            "type": "string",
+            "title": "Eje del chip hacia estribor",
+            "description": "qué eje del BNO08x apunta a estribor (por defecto +x); perpendicular al de proa o el plugin no arranca",
+            "enum": ["+x", "-x", "+y", "-y", "+z", "-z"],
+            "default": "+x"
           },
           "devHdgOffset": {
             "type": "number",
@@ -76,6 +89,84 @@
             "title": "Pitch Offset",
             "description": "correction for pitch in degrees (-90.0 to 90.0)",
             "default": 0
+          },
+          "devHeadingSource": {
+            "type": "string",
+            "title": "Fuente de rumbo y actitud",
+            "description": "rotationVector: fusión acel+giro+magnetómetro del BNO08x, referida al Norte magnético y con estimación de precisión del rumbo (recomendado). gameRotationVector: comportamiento anterior, sin magnetómetro: rumbo sin referencia al Norte y que deriva con el tiempo.",
+            "enum": [
+              "rotationVector",
+              "gameRotationVector"
+            ],
+            "default": "rotationVector"
+          },
+          "devAttitudeRate": {
+            "type": "number",
+            "title": "Frecuencia de actitud y rateOfTurn (Hz)",
+            "description": "navigation.attitude y navigation.rateOfTurn (1-50)",
+            "default": 10
+          },
+          "devHeadingRate": {
+            "type": "number",
+            "title": "Frecuencia de rumbo (Hz)",
+            "description": "navigation.headingCompass/Magnetic/True (1-50)",
+            "default": 10
+          },
+          "devAccelRate": {
+            "type": "number",
+            "title": "Frecuencia de aceleración lineal (Hz)",
+            "description": "sensors.imu.acceleration y sensors.imu.verticalAcceleration (1-50; 10-20 para olas)",
+            "default": 10
+          },
+          "devStatusRate": {
+            "type": "number",
+            "title": "Frecuencia del estado del IMU (Hz)",
+            "description": "sensors.imu.calibration.* y sensors.imu.headingAccuracy (0.1-5)",
+            "default": 1
+          },
+          "devRateOfTurn": {
+            "type": "boolean",
+            "title": "Publicar navigation.rateOfTurn (giróscopo)",
+            "default": true
+          },
+          "devLinearAcceleration": {
+            "type": "boolean",
+            "title": "Publicar la aceleración lineal (sin gravedad)",
+            "default": true
+          },
+          "devDynamicCalibration": {
+            "type": "boolean",
+            "title": "Calibración dinámica continua",
+            "description": "Activa la calibración dinámica de acelerómetro, giróscopo y magnetómetro del BNO08x en cada arranque/reconexión (no persiste tras un reset del chip).",
+            "default": true
+          },
+          "devAutoSaveCalibration": {
+            "type": "boolean",
+            "title": "Guardar la calibración cuando sea buena",
+            "description": "Guarda en el chip la calibración dinámica (DCD) cuando magnetómetro y fuente de orientación llevan devAutoSaveSeconds con estado >= devAutoSaveMinStatus; como mucho una vez cada devAutoSaveIntervalMin.",
+            "default": false
+          },
+          "devAutoSaveMinStatus": {
+            "type": "number",
+            "title": "Estado mínimo para guardar (1-3)",
+            "description": "0 no fiable, 1 baja, 2 media, 3 alta",
+            "default": 3
+          },
+          "devAutoSaveSeconds": {
+            "type": "number",
+            "title": "Segundos seguidos con estado bueno antes de guardar",
+            "default": 30
+          },
+          "devAutoSaveIntervalMin": {
+            "type": "number",
+            "title": "Minutos mínimos entre guardados",
+            "default": 60
+          },
+          "devWatchdogSeconds": {
+            "type": "number",
+            "title": "Vigilancia: segundos sin datos para dar el sensor por colgado",
+            "description": "Pasado ese tiempo sin muestras nuevas se deja de publicar y se reconecta (espera creciente 1-30 s).",
+            "default": 3
           }
         }
       }

@@ -1,3 +1,22 @@
+## 1.1.0-majareta.2
+- **Actitud con el montaje explícito (sensor → barco)**: nuevas opciones `devEjeProa` y `devEjeEstribor` (por defecto `+y` y `+x`, el montaje del README). La actitud sale de girar esos dos ejes al marco Tierra (Z-Y-X: roll + estribor abajo, pitch + proa arriba, yaw = rumbo de la proa). La fórmula del plugin original tomaba el rumbo del +Y del chip pero el balance alrededor del +X: con el +Y a proa, **balance y cabeceo salían cambiados** (escorar 20° a estribor publicaba pitch −20°). Auditoría del 30-oct, H7.
+- **Cambia `navigation.attitude`** respecto a 1.1.0-majareta.1 con el montaje por defecto: roll y pitch ahora son los físicos. Hay que comprobarlo a bordo (escorar a estribor → roll +; proa arriba → pitch +).
+- Pruebas de movimientos físicos conocidos (escora, cabeceo, rumbo, combinaciones y 2.000 actitudes al azar que vuelven), otro montaje sin offsets, montajes imposibles y la coherencia con el marco del barco. Se retira `find_attitude` y la prueba que la comparaba con la fórmula vieja.
+
+## 1.1.0-majareta.1
+- **Nuevo `navigation.rateOfTurn`** (rad/s, + a estribor) desde el giróscopo calibrado, como componente vertical (marco Tierra) de la velocidad angular: no depende del montaje ni de la escora.
+- **Nueva aceleración lineal sin gravedad**: `sensors.imu.acceleration` {x proa, y estribor, z abajo} en m/s² y `sensors.imu.verticalAcceleration` (marco Tierra, + arriba) para medir las olas. Van bajo prefijo propio porque Signal K 1.8.x no tiene rutas estándar para esto (no existen `navigation.acceleration` ni `environment.*.waves`).
+- **Rumbo fusionado de verdad**: nueva opción `devHeadingSource`, por defecto `rotationVector` (acelerómetro + giróscopo + magnetómetro, referido al Norte magnético). Antes el rumbo salía del game rotation vector, que no usa el magnetómetro: no tenía referencia al Norte y derivaba. `gameRotationVector` mantiene el comportamiento anterior.
+- Nuevas `sensors.imu.headingAccuracy` (rad, la estimación de precisión del rumbo del rotation vector, que la librería de Adafruit descartaba) y `sensors.imu.calibration.<informe>` (0-3 de cada sensor).
+- Calibración dinámica: `devDynamicCalibration` (activa por defecto en cada arranque/reconexión) y `devAutoSaveCalibration` (guarda la calibración cuando el estado es bueno de forma sostenida, con límite de frecuencia). `devCalibRequired` ya no guarda la calibración si se agota el tiempo.
+- Frecuencias configurables por grupo: `devAttitudeRate`, `devHeadingRate`, `devAccelRate` (10 Hz por defecto) y `devStatusRate` (1 Hz). `devRefresh` queda obsoleto. Cada informe del chip se pide al doble de su frecuencia de publicación.
+- Un único delta por ciclo, con el `timestamp` real de cada muestra; no se republican muestras ya enviadas ni caducadas.
+- Robustez: tres fallos de I2C seguidos o `devWatchdogSeconds` (3 s) sin muestras nuevas dan el sensor por perdido; se deja de publicar, se muestra el estado (`sensors.imu.state` y el estado del plugin en la interfaz) y se reconecta con espera creciente hasta 30 s, sin matar el plugin.
+- La declinación (NOAA / Signal K) se consulta en un hilo aparte: ya no detiene la actitud. Las peticiones HTTP llevan timeout.
+- Los rumbos (`headingCompass`, `headingMagnetic`, `headingTrue`) y el `yaw` se envuelven a [0, 2π).
+- `index.js`: junta las líneas cortadas entre trozos de la salida de python, una línea mala ya no hace perder las demás y los mensajes de estado de `plugin.py` llegan al estado del plugin.
+- La lógica sin hardware vive en `imu_nucleo.py`, con pruebas en `test/` (`python3 -m unittest discover -s test -v` o `npm test`). El antiguo script `test` pasa a `test/smoke.js`.
+
 ## Unreleased
 - Fixed crash when no BNO08X is on the I2C bus: the scan error was logged and then `NameError: name 'addr' is not defined` killed the python child. The plugin now logs the missing sensor once and rescans the bus every 30 s, so a sensor connected later is picked up.
 - Fixed `scan_for_bno()` leaving the I2C bus locked when no sensor was found (`i2c.unlock` was referenced but not called).

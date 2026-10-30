@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-require('./')({
+require('../')({
   debug: () => {},
   handleMessage: (id, x) => {
     console.log(`handleMessage:${JSON.stringify(x)}`)
