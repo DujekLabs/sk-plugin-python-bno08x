@@ -19,18 +19,31 @@ module.exports = function (app) {
       child = spawn(MY_PYTHON, ['plugin.py'], { cwd: __dirname })
       const thisChild = child
 
+      const setStatus = msg => (typeof app.setPluginStatus === 'function' ? app.setPluginStatus(msg) : console.log(msg))
+
+      // Una línea JSON por mensaje. Un trozo de 'data' puede cortar una línea a la
+      // mitad (a 10-20 deltas/s pasa), así que se guarda el resto para el siguiente.
+      // Las líneas con 'skPluginStatus' son el estado del plugin (ok / reconectando),
+      // no deltas. Una línea mala ya no hace perder las demás del mismo trozo.
+      let pendiente = ''
       child.stdout.on('data', data => {
-        // app.debug(data.toString())
-        try {
-          data.toString().split(/\r?\n/).forEach(line => {
-            // console.log(JSON.stringify(line))
-            if (line.length > 0) {
-              app.handleMessage(undefined, JSON.parse(line))
-            }
-          })
-        } catch (e) {
-          console.error(e.message)
-        }
+        const lines = (pendiente + data.toString()).split(/\r?\n/)
+        pendiente = lines.pop()
+        lines.forEach(line => {
+          if (line.length === 0) return
+          let msg
+          try {
+            msg = JSON.parse(line)
+          } catch (e) {
+            console.error('sk-py-bno08x: invalid line from plugin.py: ' + line.slice(0, 200))
+            return
+          }
+          if (msg && msg.skPluginStatus !== undefined) {
+            (msg.error ? setError : setStatus)(msg.skPluginStatus)
+          } else {
+            app.handleMessage(undefined, msg)
+          }
+        })
       })
 
       child.stderr.on('data', fromChild => {

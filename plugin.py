@@ -23,192 +23,23 @@ SOFTWARE.
 
 """
 
-import sys, json, datetime, logging, os, time;
 
-import ujson, requests
+# Rama majareta (DujekLabs): la lógica que no toca el hardware está en imu_nucleo.py
+# (probada en test/); este fichero solo conecta el núcleo con el bus I2C, la red
+# (declinación NOAA) y la salida hacia index.js.
 
-from urllib.request import urlopen
+import sys, json, logging, os, time, threading
 
-from math import atan2, asin, pi, sqrt
+from math import pi
 
-import board
-import busio
+import imu_nucleo
+from imu_nucleo import Config, BucleImu, crear_clase_bno, esperar_calibracion
 
-from digitalio import DigitalInOut
+_BNO08X_DEFAULT_ADDRESS = 0x4A
+_BNO08X_ALTERNATIVE_ADDRESS = 0x4B
+_SK_LOCAL = 'http://localhost:3000/signalk/v1/api/vessels/self/navigation/'
+_DEBUG_LOG_MAX = 1000000  # debug.log se reescribe al pasar de 1 MB
 
-import adafruit_bno08x
-from adafruit_bno08x import (
-    BNO_REPORT_ACCELEROMETER,
-    BNO_REPORT_GYROSCOPE,
-    BNO_REPORT_MAGNETOMETER,
-    BNO_REPORT_ROTATION_VECTOR,
-    BNO_REPORT_GAME_ROTATION_VECTOR,
-)
-from adafruit_bno08x.i2c import BNO08X_I2C
-
-from micropython import const
-
-_BNO08X_DEFAULT_ADDRESS = const(0x4A)
-_BNO08X_ALTERNATIVE_ADDRESS = const(0x4B)
-
-def scan_for_bno(i2c, preferred=None, quiet=False):
-    while not i2c.try_lock():
-      pass
-    try:
-        # Scan and print results
-        #print("I2C Scanner")
-        devices = i2c.scan()
-    finally:
-        # Unlock the bus (also when the scan fails or no device is found)
-        i2c.unlock()
-    #print("I2C devices found: ", [hex(i) for i in devices], file = sys.stderr)
-    if not quiet:
-        for i in devices:
-            logger.info ("I2C devices found: [" + hex(i) + "]")
-    if preferred in (_BNO08X_DEFAULT_ADDRESS, _BNO08X_ALTERNATIVE_ADDRESS) and preferred in devices:
-      address=preferred # the configured address wins when it is on the bus
-    elif _BNO08X_ALTERNATIVE_ADDRESS in devices:
-      address=_BNO08X_ALTERNATIVE_ADDRESS
-    elif _BNO08X_DEFAULT_ADDRESS in devices:
-      address=_BNO08X_DEFAULT_ADDRESS
-    else:
-      raise ValueError("NO VALID BNO08X ADDRESS FOUND IN THE I2C BUS")
-    return address
-
-# Seconds between I2C scans while no BNO08X is on the bus
-_SCAN_RETRY_SECONDS = 30
-
-def wait_for_bno(i2c, preferred):
-    """Scan until a BNO08X answers. Logs the missing sensor once instead of crashing
-    (before, a missing sensor ended in "NameError: name 'addr' is not defined")."""
-    warned = False
-    while True:
-        try:
-            return scan_for_bno(i2c, preferred, quiet=warned)
-        except ValueError as e:
-            if not warned:
-                logger.critical(str(e) + " - retrying every " + str(_SCAN_RETRY_SECONDS) + " s")
-                warned = True
-        time.sleep(_SCAN_RETRY_SECONDS)
-
-def find_attitude(dqw, dqx, dqy, dqz):
-    norm = sqrt(dqw * dqw + dqx * dqx + dqy * dqy + dqz * dqz)
-    dqw = dqw / norm
-    dqx = dqx / norm
-    dqy = dqy / norm
-    dqz = dqz / norm
-
-    ysqr = dqy * dqy
-    xsqr = dqx * dqx
-    zsqr = dqz * dqz
-
-    t0 = +2.0 * (dqw * dqx + dqy * dqz)
-    t1 = +1.0 - 2.0 * (xsqr + ysqr)
-    roll_raw = atan2(t0, t1)
-    roll = -roll_raw # report clockwise in radians from 0 to + or - pi
-
-    t2 = +2.0 * (dqw * dqy - dqz * dqx)
-    t2 = +1.0 if t2 > +1.0 else t2
-    t2 = -1.0 if t2 < -1.0 else t2
-    pitch_raw = asin(t2)
-    pitch = -pitch_raw # report clockwise in radians from 0 to + or - pi
-
-    t3 = +2.0 * (dqw * dqz + dqx * dqy)
-    t4 = +1.0 - 2.0 * (ysqr + zsqr)
-    yaw_raw = atan2(t3, t4)
-    if yaw_raw > 0:
-        yaw = 2*pi - yaw_raw
-    else:
-        yaw = abs(yaw_raw)
-    # heading in radians clockwise from 0 to 2*pi
-
-    return roll, pitch, yaw 
-
-def internet_on():
-    try:
-        response = urlopen('https://www.google.com/', timeout=10)
-        return True
-    except: 
-        return False
-
-def SignalkPositionAvailable():
-    """Return the Signal K response for navigation.position, or None if there is no position."""
-    try:
-        resp = requests.get('http://localhost:3000/signalk/v1/api/vessels/self/navigation/position/value', verify=False)
-        testo = resp.text
-        if resp.status_code != 200 or testo =='null':
-            return None
-        else:
-            return resp
-    except:
-        return None
-
-def getSignalkVariation():
-    try:
-        # use the last value stored in signalk
-        resp = requests.get('http://localhost:3000/signalk/v1/api/vessels/self/navigation/magneticVariation/$source', verify=False)
-        data = ujson.loads(resp.content)
-        if data != my_source :
-            try:
-                resp = requests.get('http://localhost:3000/signalk/v1/api/vessels/self/navigation/magneticVariation/values', verify=False)
-                data = ujson.loads(resp.content)
-                return data[my_source]['value']
-            except:
-                return decl_rad # anyway return the last available value stored in 'decl_rad' global
-        else:
-            resp = requests.get('http://localhost:3000/signalk/v1/api/vessels/self/navigation/magneticVariation/value', verify=False)
-            data = ujson.loads(resp.content)
-            return data
-    except:
-        return decl_rad # anyway return the last available value stored in 'decl_rad' global
-
-def getDeclination():
-    #resp = requests.get('http://localhost:3000/signalk/v1/api/vessels/self/navigation/position/values/signalk-fixed-position/value', verify=False)
-    #DONE Manage exception not null 'position' not available in Signalk data
-    #resp = requests.get('http://localhost:3000/signalk/v1/api/vessels/self/navigation/position/value', verify=False)
-    resp = SignalkPositionAvailable()
-    if resp is not None :
-        try:
-            # manage malformed/unexpected resp content
-            #resp = requests.get('http://localhost:3000/signalk/v1/api/vessels/self/navigation/position/value', verify=False)
-            # resp returned by the SignalkPositionAvailable () call
-            data = ujson.loads(resp.content)
-            lat = "{:.4f}".format(data['latitude'])
-            lon = "{:.4f}".format(data['longitude'])
-            if internet_on() :
-                try:
-                    NOAA_DeclCalcAPI = "https://www.ngdc.noaa.gov/geomag-web/calculators/calculateDeclination?lat1="\
-+lat+"&lon1="+lon+"&key=zNEw7&resultFormat=json"
-                    resp = requests.get(NOAA_DeclCalcAPI, verify=True)
-                #try:
-                    # manage malformed/unexpected resp content
-                    data = ujson.loads(resp.content)
-                    decl_res = data['result']
-                    for key in decl_res:
-                        #logger.info("Declination got from NoAA")
-                        return key['declination'] * pi/180 # NoAA conventionally responds in degrees
-                except:
-                    return getSignalkVariation() # anyway return last available value
-            else:
-                return getSignalkVariation() # anyway return last available value 
-        except:
-            return getSignalkVariation() # anyway return last available value
-    else:
-        return getSignalkVariation() # anyway return last available value
-class pluginConfig():
-    def __init__(self, dev, rate, rd, nc, nd, di, de, ohdg, odev, oroll, opitch):
-        self.name = dev
-        self.rate = rate
-        self.delay = rd
-        self.calib_needed = nc
-        self.hdgOffset = ohdg
-        self.hdgDeviation = odev
-        self.rollOffset = oroll
-        self.pitchOffset = opitch
-        self.decl_needed = nd
-        self.decl_interval = di
-        self.decl_estimate = de
-        self.delaycount = 0
 
 class CustomAdapter(logging.LoggerAdapter):
     """
@@ -219,190 +50,288 @@ class CustomAdapter(logging.LoggerAdapter):
     def process(self, msg, kwargs):
         return '[%s] %s' % (self.extra['pluginid'], msg), kwargs
 
-def skOutput(mySource, path, value):
-
-    skData = {'updates': [{'source': {'label': 'IMU sensor', 'src': mySource }, 'timestamp': datetime.datetime.utcnow().isoformat() + "Z", 'values': [{'path': path, 'value': value}]}]}
-    print(json.dumps(skData) + '\n')
-
-def skOutput_att(mySource, path, r, p, y):
-
-    skData = {'updates': [{'source': {'label': 'IMU sensor', 'src': mySource }, 'timestamp': datetime.datetime.utcnow().isoformat() + "Z", 'values': [{'path': path, 'value':\
-            {"pitch": p, "roll": r, "yaw": y}}]}]}
-    print(json.dumps(skData) + '\n')
-
-def sensorReportLoop(mySource,rate, bno, dCfg):
-    times_for_calib_status_update = 100 # calibration status sent every 100 times the normal attitude delta is sent
-    declInterval_start = time.monotonic()
-    global decl_rad
-    global resp
-    while True:
-        time.sleep(rate)
-        if dCfg.delaycount == 0:
-            dCfg.delaycount = dCfg.delay
-            with open ('debug.log', 'a') as sys.stdout :
-                game_quat_i, game_quat_j, game_quat_k, game_quat_real = bno.game_quaternion
-                sys.stdout.flush()
-            sys.stdout = sys.__stdout__ # restore normal stdout file object
-            roll, pitch, yaw = find_attitude(game_quat_real, game_quat_i, game_quat_j, game_quat_k)
-            roll += dCfg.rollOffset * pi/180
-            pitch += dCfg.pitchOffset * pi/180
-            yaw += dCfg.hdgOffset * pi/180
-            skOutput_att(mySource,'navigation.attitude', roll, pitch, yaw)
-            skOutput(mySource,'navigation.headingCompass', yaw) # headingCompass from 0 to 2*pi radians clockwise
-            headingMagnetic = yaw + dCfg.hdgDeviation * pi/180
-            #TODO 1: implement a 'deviation table' of values for different bearings and interpolate between them
-            skOutput(mySource,'navigation.headingMagnetic', headingMagnetic)
-            if dCfg.decl_needed :
-                skOutput ( mySource, 'navigation.headingTrue', headingMagnetic + decl_rad )
-                time_current = time.monotonic()
-                if ((time_current - declInterval_start) >= dCfg.decl_interval*3600) : # Interval in hours
-                    decl_rad = getDeclination()
-                    declInterval_start = time_current
-                    skOutput ( mySource, 'navigation.magneticVariation', decl_rad )
-            if dCfg.calib_needed :
-                if times_for_calib_status_update == 0:
-                    times_for_calib_status_update = 100
-                    if os.stat('debug.log').st_size > 1000000 : # save only last (of less than 1mb size) debug.log
-                        mode = 'w'
-                    else:
-                        mode = 'a'
-                    with open('debug.log', mode) as sys.stdout : # redirect stdout to debug.log to avoid debug messages 
-                                                                 # being read by javascript parent process
-                        print ("DEBUG: PERIODIC CALIBRATION VERIFIED AT "+ datetime.datetime.utcnow().isoformat())
-                        calibration_status = bno.calibration_status
-                        sys.stdout.flush()
-                    sys.stdout = sys.__stdout__ # restore normal stdout file object
-                    skOutput(mySource,'sensors.magnetometer.calibration_status', calibration_status)
-                    skOutput(mySource,'sensors.magnetometer.calibration_quality', adafruit_bno08x.REPORT_ACCURACY_STATUS[calibration_status])
-                else:
-                   times_for_calib_status_update -= 1
-            sys.stdout.flush()
-        else:
-            dCfg.delaycount -= 1
-
-def sensorCalibrate(dev, mySource,  bno):
-    with open ('calibration.log', 'w') as sys.stdout: # log all packet error during calibration 
-        bno.begin_calibration()
-        bno.enable_feature(BNO_REPORT_MAGNETOMETER)
-        bno.enable_feature(BNO_REPORT_GAME_ROTATION_VECTOR)
-        calibration_good = False
-        start_time = time.monotonic()
-        calibration_good_at = start_time
-        source ='BNO08X_I2C_AT[' +hex(dev)+']'
-        print ("=============== "+ source + " CALIBRATION START =========================")
-        print ("")
-        while True:
-            time.sleep(0.1)
-            mag_x, mag_y, mag_z = bno.magnetic
-            (
-                game_quat_i,
-                game_quat_j,
-                game_quat_k,
-                game_quat_real,
-            ) = bno.game_quaternion
-            calibration_status = bno.calibration_status
-            current_time = time.monotonic()
-            if calibration_status < 2:
-                calibration_good = False
-                calibration_good_at = current_time # reset calib interval start
-            else:
-                if not calibration_good :
-                    calibration_good_at = time.monotonic()
-                calibration_good = True
-            if calibration_good and (current_time - calibration_good_at > 5.0):
-                # wait at least 5 seconds to let calib being stabilized
-                calib_exit = "CALIBRATION OK"
-                break
-            if (current_time - start_time) > 50.0 :
-                logger.critical (' Calibration timeout !!!')
-                #raise ValueError (' CALIBRATION TIMEOUT ERROR')
-                calib_exit = "CALIBRATION TIMEOUT ERROR"
-                break
-        print (calib_exit)
-        print ("Calibrate obtained in "+ repr(current_time-start_time) + ' fractional sec.')
-        print ('Calibration status = ' + repr(calibration_status))
-        print ('Calibration accuracy: ' + adafruit_bno08x.REPORT_ACCURACY_STATUS[calibration_status])
-        print ("=============== "+ source + " CALIBRATION END =========================")
-        bno.save_calibration_data()
-        sys.stdout.flush()
-    sys.stdout = sys.__stdout__ # restore normal stdout behavior
-    skOutput(mySource,'sensors.magnetometer.calibration_status',calibration_status)
-    skOutput(mySource,'sensors.magnetometer.calibration_quality',adafruit_bno08x.REPORT_ACCURACY_STATUS[calibration_status])
-    sys.stdout.flush()
-    logger.info("calibration done")
-
-    
-# main entry (enable logging and check device configurations)
-
-myConfigList: list[pluginConfig] = []
-
 
 basic_logger = logging.getLogger(__name__)
 logger = CustomAdapter(basic_logger, {'pluginid': "sk-py-bno08x"})
-logging.basicConfig(stream = sys.stderr, level = logging.DEBUG)
-logging.getLogger("adafruit_bno08x").setLevel(logging.WARNING)
 
-# Source - https://stackoverflow.com/a/11029841
-# Posted by aknuds1, modified by community. See post 'Timeline' for change history
-# Retrieved 2026-02-02, License - CC BY-SA 3.0
 
-logging.getLogger("requests").setLevel(logging.WARNING)
-logging.getLogger("urllib3").setLevel(logging.WARNING)
+class LogLimitado:
+    """Destino de sys.stdout: la librería de Adafruit imprime paquetes de depuración
+    con print(); si llegaran a la salida real romperían el flujo de deltas que lee
+    index.js. Van a debug.log, que se reescribe al pasar de 1 MB."""
 
-config = json.loads(input())
+    def __init__(self, ruta):
+        self.ruta = ruta
+        self.f = open(ruta, 'a')
 
-for options in config["imuDevices"]:
+    def write(self, texto):
+        try:
+            if self.f.tell() > _DEBUG_LOG_MAX:
+                self.f.close()
+                self.f = open(self.ruta, 'w')
+            return self.f.write(texto)
+        except Exception:
+            return 0
 
-    plgCfg = pluginConfig(options["devName"],
-                          options["devRefresh"],
-                          options["devDelayReports"],
-                          options["devCalibRequired"],
-                          options["devDeclRequired"],
-                          options["devDeclInterval"],
-                          options["devDeclEstimate"],
-                          options["devHdgOffset"],
-                          options["devHdgDeviation"],
-                          options["devRollOffset"],
-                          options["devPitchOffset"])
-    myConfigList.append(plgCfg)
-    
-    global my_source
-    global my_source_addr_part
-    global decl_rad
-    global resp
+    def flush(self):
+        try:
+            self.f.flush()
+        except Exception:
+            pass
 
-    i2c = busio.I2C(board.SCL, board.SDA)
-    addr = wait_for_bno(i2c, plgCfg.name)
-    #
-    if addr != plgCfg.name :
-        logger.critical("THE CONFIGURED ADDRESS VALUE '" + (hex(plgCfg.name) if isinstance(plgCfg.name, int) else str(plgCfg.name)) + "'" +" IS DIFFERENT FROM THE ONE FOUND --> '" + hex(addr) + "'")
-    package_name = 'sk-py-bno08x'
-    my_source_addr_part = 'I2C_at['+hex(addr)+']'
-    my_source = package_name + '.' + my_source_addr_part
-    rRate = 1/plgCfg.rate # convert reports/sec in secs btw reports
-    bno = BNO08X_I2C(i2c, reset=None , address= addr, debug=False)
-    if plgCfg.calib_needed :
-        sensorCalibrate(addr, my_source_addr_part, bno)
-    else :
-        bno.enable_feature(BNO_REPORT_MAGNETOMETER)
-        bno.enable_feature(BNO_REPORT_GAME_ROTATION_VECTOR)
-    
-    sys.stdout.flush() #to guarantee that output buffer is clean after bno calib/enable features
-    time.sleep(0.2)
-    
-    # set the estimate defined in schema as the initial default value
-    decl_rad = plgCfg.decl_estimate * pi/180 # choosen to use degrees for user input in config
-    if plgCfg.decl_needed :
-        decl_rad = getDeclination()
-        skOutput( my_source_addr_part, 'navigation.magneticVariation', decl_rad )
-        logger.info ("navigation.magneticVariation initialized")
 
-    sensorReportLoop(my_source_addr_part, rRate, bno, plgCfg)    
+class SalidaSignalK:
+    """Escribe una línea JSON por mensaje en la salida estándar real (la que lee
+    index.js). Los mensajes con 'skPluginStatus' son estado del plugin, no deltas."""
 
-for line in iter(sys.stdin.readline, b''):
+    def __init__(self, f):
+        self.f = f
+        self.cerrojo = threading.Lock()
+
+    def escribir(self, obj):
+        linea = json.dumps(obj) + '\n'
+        with self.cerrojo:
+            self.f.write(linea)
+            self.f.flush()
+
+    def delta(self, delta):
+        self.escribir(delta)
+
+    def estado(self, texto, error=False):
+        (logger.error if error else logger.info)(texto)
+        self.escribir({'skPluginStatus': texto, 'error': bool(error)})
+
+
+# ---------------------------------------------------------------------------
+# Declinación magnética (NOAA o Signal K), en un hilo para no bloquear el bucle
+# ---------------------------------------------------------------------------
+
+class Declinacion:
+    """Mismo criterio que antes (NOAA con la posición de Signal K; si no, el último
+    valor de Signal K; si no, el estimado del schema), pero en segundo plano: antes las
+    consultas de red (hasta decenas de segundos) paraban la publicación de la actitud."""
+
+    def __init__(self, cfg, my_source):
+        self.valor = cfg.decl_estimate * pi / 180  # estimación del schema en grados
+        self.my_source = my_source
+        self.intervalo = max(60.0, cfg.decl_interval * 3600)
+        self._nueva = None
+        self._cerrojo = threading.Lock()
+
+    def arrancar(self):
+        threading.Thread(target=self._hilo, name='declinacion', daemon=True).start()
+
+    def tomar_nueva(self):
+        with self._cerrojo:
+            v, self._nueva = self._nueva, None
+            return v
+
+    def _hilo(self):
+        while True:
+            try:
+                v = self.getDeclination()
+                if v is not None:
+                    with self._cerrojo:
+                        self.valor = v
+                        self._nueva = v
+                    logger.info("navigation.magneticVariation updated")
+            except Exception as e:
+                logger.warning("declination update failed: %r" % (e,))
+            time.sleep(self.intervalo)
+
+    @staticmethod
+    def internet_on():
+        from urllib.request import urlopen
+        try:
+            urlopen('https://www.google.com/', timeout=10)
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def SignalkPositionAvailable():
+        """Return the Signal K response for navigation.position, or None if there is no position."""
+        import requests
+        try:
+            resp = requests.get(_SK_LOCAL + 'position/value', verify=False, timeout=10)
+            if resp.status_code != 200 or resp.text == 'null':
+                return None
+            return resp
+        except Exception:
+            return None
+
+    def getSignalkVariation(self):
+        import requests, ujson
+        try:
+            # use the last value stored in signalk
+            resp = requests.get(_SK_LOCAL + 'magneticVariation/$source', verify=False, timeout=10)
+            data = ujson.loads(resp.content)
+            if data != self.my_source:
+                try:
+                    resp = requests.get(_SK_LOCAL + 'magneticVariation/values', verify=False, timeout=10)
+                    data = ujson.loads(resp.content)
+                    return data[self.my_source]['value']
+                except Exception:
+                    return self.valor
+            resp = requests.get(_SK_LOCAL + 'magneticVariation/value', verify=False, timeout=10)
+            return ujson.loads(resp.content)
+        except Exception:
+            return self.valor  # anyway return the last available value
+
+    def getDeclination(self):
+        import requests, ujson
+        resp = self.SignalkPositionAvailable()
+        if resp is None:
+            return self.getSignalkVariation()
+        try:
+            data = ujson.loads(resp.content)
+            lat = "{:.4f}".format(data['latitude'])
+            lon = "{:.4f}".format(data['longitude'])
+            if not self.internet_on():
+                return self.getSignalkVariation()
+            NOAA_DeclCalcAPI = ("https://www.ngdc.noaa.gov/geomag-web/calculators/calculateDeclination?lat1="
+                                + lat + "&lon1=" + lon + "&key=zNEw7&resultFormat=json")
+            resp = requests.get(NOAA_DeclCalcAPI, verify=True, timeout=15)
+            data = ujson.loads(resp.content)
+            for key in data['result']:
+                return key['declination'] * pi / 180  # NoAA conventionally responds in degrees
+        except Exception:
+            pass
+        return self.getSignalkVariation()
+
+
+# ---------------------------------------------------------------------------
+# Hardware
+# ---------------------------------------------------------------------------
+
+def scan_for_bno(i2c, preferred=None, quiet=False):
+    while not i2c.try_lock():
+        pass
     try:
-        data = json.loads(line)
-        sys.stderr.write(json.dumps(data))
-    except:
-        sys.stderr.write('error parsing json\n')
-        sys.stderr.write(line)
+        devices = i2c.scan()
+    finally:
+        # Unlock the bus (also when the scan fails or no device is found)
+        i2c.unlock()
+    if not quiet:
+        logger.info("I2C devices found: " + str([hex(i) for i in devices]))
+    if preferred in (_BNO08X_DEFAULT_ADDRESS, _BNO08X_ALTERNATIVE_ADDRESS) and preferred in devices:
+        return preferred  # the configured address wins when it is on the bus
+    if _BNO08X_ALTERNATIVE_ADDRESS in devices:
+        return _BNO08X_ALTERNATIVE_ADDRESS
+    if _BNO08X_DEFAULT_ADDRESS in devices:
+        return _BNO08X_DEFAULT_ADDRESS
+    raise ValueError("NO VALID BNO08X ADDRESS FOUND IN THE I2C BUS")
+
+
+class ConectorBno:
+    """Abre el bus, encuentra el BNO08x, lo inicializa y activa los informes.
+    Se llama en el arranque y en cada reconexión."""
+
+    def __init__(self):
+        import board, busio
+        import adafruit_bno08x
+        from adafruit_bno08x.i2c import BNO08X_I2C
+        # los identificadores del núcleo deben coincidir con los de la librería
+        for nombre, valor in (('BNO_REPORT_GYROSCOPE', imu_nucleo.INF_GIROSCOPIO),
+                              ('BNO_REPORT_MAGNETOMETER', imu_nucleo.INF_MAGNETOMETRO),
+                              ('BNO_REPORT_LINEAR_ACCELERATION', imu_nucleo.INF_ACEL_LINEAL),
+                              ('BNO_REPORT_ROTATION_VECTOR', imu_nucleo.INF_VECTOR_ROTACION),
+                              ('BNO_REPORT_GAME_ROTATION_VECTOR', imu_nucleo.INF_VECTOR_ROTACION_JUEGO)):
+            if getattr(adafruit_bno08x, nombre) != valor:
+                raise RuntimeError("unexpected adafruit_bno08x constant " + nombre)
+        self.board, self.busio = board, busio
+        self.clase = crear_clase_bno(BNO08X_I2C)
+        self.i2c = None
+        self.primera = True
+        self.direccion = None
+
+    def __call__(self, cfg):
+        if self.i2c is None:
+            self.i2c = self.busio.I2C(self.board.SCL, self.board.SDA)
+        try:
+            addr = scan_for_bno(self.i2c, cfg.direccion, quiet=not self.primera)
+        except Exception:
+            self._cerrar_bus()  # el próximo intento vuelve a abrir el bus desde cero
+            raise
+        if addr != cfg.direccion and self.primera:
+            logger.critical("THE CONFIGURED ADDRESS VALUE '"
+                            + (hex(cfg.direccion) if isinstance(cfg.direccion, int) else str(cfg.direccion))
+                            + "' IS DIFFERENT FROM THE ONE FOUND --> '" + hex(addr) + "'")
+        self.direccion = addr
+        try:
+            bno = self.clase(self.i2c, reset=None, address=addr, debug=False)
+            if cfg.calib_dinamica or (cfg.calib_inicio and self.primera):
+                bno.iniciar_calibracion()  # no persiste tras un reset del chip
+            for informe, intervalo_us in cfg.informes().items():
+                bno.enable_feature(informe, intervalo_us)
+            if cfg.calib_inicio and self.primera:
+                self._calibrar_arranque(bno)
+        except Exception:
+            self._cerrar_bus()
+            raise
+        self.primera = False
+        return bno
+
+    def _cerrar_bus(self):
+        try:
+            if self.i2c is not None:
+                self.i2c.deinit()
+        except Exception:
+            pass
+        self.i2c = None
+
+    def _calibrar_arranque(self, bno):
+        """devCalibRequired: espera hasta 50 s a un estado >= 2 estable 5 s, como antes,
+        pero solo guarda la calibración si se ha conseguido."""
+        logger.info("startup calibration: move the sensor (up to 50 s)")
+        ok, estado = esperar_calibracion(lambda: bno.calibration_status)
+        if ok:
+            bno.guardar_calibracion()
+            logger.info("calibration done and saved, status = %d (%s)"
+                        % (estado, imu_nucleo.REPORT_ACCURACY_STATUS[estado]))
+        else:
+            logger.critical("Calibration timeout !!! status = %d, calibration NOT saved" % estado)
+
+
+def main():
+    salida_real = sys.stdout
+    logging.basicConfig(stream=sys.stderr, level=logging.DEBUG)
+    logging.getLogger("adafruit_bno08x").setLevel(logging.WARNING)
+    logging.getLogger("requests").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+
+    config = json.loads(sys.stdin.readline())
+    dispositivos = config.get("imuDevices") or [{}]
+    if len(dispositivos) > 1:
+        logger.warning("only the first entry of imuDevices is used")
+    cfg = Config(dispositivos[0])
+
+    salida = SalidaSignalK(salida_real)
+    sys.stdout = LogLimitado(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'debug.log'))
+
+    try:
+        conector = ConectorBno()
+    except Exception as e:
+        salida.estado("cannot load the BNO08x libraries: %r" % (e,), True)
+        raise
+
+    # El src depende de la dirección encontrada; hasta conectar se usa la configurada
+    def src():
+        addr = conector.direccion if conector.direccion is not None else cfg.direccion
+        return 'I2C_at[' + (hex(addr) if isinstance(addr, int) else str(addr)) + ']'
+
+    declinacion = None
+    if cfg.decl_needed:
+        declinacion = Declinacion(cfg, 'sk-py-bno08x.' + src())
+        declinacion.arrancar()
+
+    bucle = BucleImu(cfg, conector, salida.delta, src, estado=salida.estado, declinacion=declinacion)
+    salida.estado("starting (%s, heading from %s)" % (src(), cfg.fuente_rumbo))
+    while True:
+        bucle.paso()
+        if declinacion is not None:
+            declinacion.my_source = 'sk-py-bno08x.' + src()
+
+
+if __name__ == "__main__":
+    main()
